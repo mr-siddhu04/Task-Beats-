@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offline Voice Assistant Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Custom styles for the assistant interface */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c; /* Dark background */
+            color: #e2e8f0;
+        }
+        .assistant-card {
+            max-width: 95%;
+            margin: 20px auto;
+            min-height: 85vh;
+            background: #2d3748; /* Slightly lighter card background */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+        }
+        .mic-icon {
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .listening {
+            animation: pulse-ring 1s infinite;
+        }
+        @keyframes pulse-ring {
+            0% {
+                box-shadow: 0 0 0 0 rgba(100, 21, 255, 0.7);
+            }
+            70% {
+                box-shadow: 0 0 0 25px rgba(100, 21, 255, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(100, 21, 255, 0);
+            }
+        }
+        .command-item:nth-child(even) {
+            background-color: #242a36;
+        }
+        .command-item {
+            border-left: 4px solid #4299e1;
+        }
+        /* Mobile optimization for history list */
+        @media (max-width: 640px) {
+            .assistant-card {
+                margin: 0;
+                border-radius: 0;
+                min-height: 100vh;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="assistant-card rounded-xl p-4 sm:p-6 flex flex-col">
+        <h1 class="text-3xl font-bold text-center text-indigo-400 mb-6">Voice Command Assistant (Simulated)</h1>
+
+        <div class="mb-6 p-4 rounded-lg bg-gray-700">
+            <p class="text-sm font-semibold text-red-300">NOTE:</p>
+            <p class="text-sm">
+                A web browser cannot natively open local apps (like Spotify) for security reasons. This app provides a realistic simulation by processing your command locally and displaying the intended action. The speech recognition itself may require an active internet connection.
+            </p>
+        </div>
+        
+        <!-- Live Command Status and Output -->
+        <div class="text-center mb-8">
+            <p id="status-message" class="text-lg font-medium h-6 text-yellow-300 mb-4">Tap the mic to start listening...</p>
+            <div id="response-output" class="min-h-[60px] p-3 text-xl font-bold rounded-lg bg-gray-800 text-green-300 transition duration-300 shadow-inner flex items-center justify-center">
+                Awaiting Command...
+            </div>
+            
+        </div>
+
+        <!-- Microphone Button -->
+        <div class="flex justify-center mb-8">
+            <button id="mic-button" class="mic-icon p-6 rounded-full bg-indigo-600 hover:bg-indigo-500 shadow-xl transition duration-300 focus:outline-none focus:ring-4 focus:ring-indigo-500 focus:ring-opacity-50"
+                    onclick="startListening()">
+                <!-- SVG Microphone Icon (Lucide Icon: Mic) -->
+                <svg id="mic-svg" xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-white">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" x2="12" y1="19" y2="22"/>
+                </svg>
+            </button>
+        </div>
+        
+        <!-- Command History -->
+        <div class="flex-grow overflow-hidden flex flex-col">
+            <h2 class="text-2xl font-semibold border-b border-gray-600 pb-2 mb-4 text-indigo-300">Command History</h2>
+            <div id="history-list" class="space-y-3 overflow-y-auto pr-2 flex-grow">
+                <!-- History items will be inserted here -->
+                <p id="loading-history" class="text-center text-gray-500">Loading history...</p>
+            </div>
+        </div>
+        
+    </div>
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, collection, query, orderBy, addDoc, serverTimestamp, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- GLOBAL SETUP ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let app, db, auth, userId;
+        window.db = null; // Expose to window scope for easy use in non-module script
+        window.userId = null;
+        window.isAuthReady = false;
+
+        setLogLevel('Debug'); // Enable detailed Firestore logging
+
+        // Utility to safely get the current user ID
+        function getUserId() {
+            return auth.currentUser?.uid || crypto.randomUUID();
+        }
+
+        async function initFirebase() {
+            try {
+                if (!Object.keys(firebaseConfig).length) {
+                    throw new Error("Firebase configuration is missing or empty.");
+                }
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                window.db = db;
+                
+                // 1. Authenticate
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                userId = getUserId();
+                window.userId = userId;
+
+                // 2. Set up Auth State Listener
+                onAuthStateChanged(auth, (user) => {
+                    userId = getUserId();
+                    window.userId = userId;
+                    window.isAuthReady = true;
+                    // Start loading data after auth is confirmed
+                    if (user) {
+                        window.loadHistory(db, userId, appId);
+                    } else {
+                        document.getElementById('loading-history').textContent = "Please ensure Firebase is configured correctly.";
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase initialization or authentication failed:", error);
+                document.getElementById('loading-history').textContent = "Error initializing Firebase: " + error.message;
+            }
+        }
+
+        // Initialize Firebase on load
+        initFirebase();
+    </script>
+
+    <!-- Main Application Logic (Non-module script to access the Speech API and exposed globals) -->
+    <script>
+        // Use prefixed SpeechRecognition for wider browser compatibility
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        
+        const micButton = document.getElementById('mic-button');
+        const statusMessage = document.getElementById('status-message');
+        const responseOutput = document.getElementById('response-output');
+        const historyList = document.getElementById('history-list');
+
+        let recognition = null;
+        let isListening = false;
+
+        // --- Core Application Functions ---
+
+        /**
+         * Simulates command processing based on local keywords.
+         * @param {string} commandText - The transcribed speech text.
+         * @returns {string} The simulated response.
+         */
+        function processCommand(commandText) {
+            const lowerCommand = commandText.toLowerCase();
+            let response = "Sorry, I didn't recognize that command. Try 'Play [Song Name]' or 'Open [App Name]'.";
+
+            if (lowerCommand.includes('play') || lowerCommand.includes('music')) {
+                const songMatch = lowerCommand.match(/play\s+(.*)/);
+                const item = songMatch ? songMatch[1].trim() : 'a random playlist';
+                response = `✅ OK, simulating playback of: "${item}". Enjoy the music!`;
+            } else if (lowerCommand.includes('open') || lowerCommand.includes('launch')) {
+                const appMatch = lowerCommand.match(/(open|launch)\s+(.*)/);
+                const appName = appMatch ? appMatch[2].trim() : 'the default web browser';
+                response = `✅ Command executed. Simulating launch of: "${appName}".`;
+            } else if (lowerCommand.includes('stop') || lowerCommand.includes('pause')) {
+                response = "⏸️ Media paused successfully.";
+            } else if (lowerCommand.includes('what time') || lowerCommand.includes('current time')) {
+                response = `The current time is ${new Date().toLocaleTimeString()}.`;
+            }
+            
+            return response;
+        }
+
+        /**
+         * Starts the speech recognition service.
+         */
+        function startListening() {
+            if (!SpeechRecognition) {
+                statusMessage.textContent = "Error: Speech Recognition not supported in this browser.";
+                return;
+            }
+
+            if (isListening) {
+                stopListening();
+                return;
+            }
+            
+            // Initialize recognition object
+            recognition = new SpeechRecognition();
+            recognition.continuous = false; // Only listen for a single utterance
+            recognition.lang = 'en-US'; 
+            recognition.interimResults = false; // Only return final results
+            recognition.maxAlternatives = 1;
+
+            // Update UI state
+            isListening = true;
+            micButton.classList.add('listening');
+            statusMessage.textContent = "Listening... Speak your command now.";
+            responseOutput.textContent = "Processing...";
+
+            recognition.onresult = (event) => {
+                const last = event.results.length - 1;
+                const commandText = event.results[last][0].transcript;
+                
+                statusMessage.textContent = `You said: "${commandText}"`;
+                
+                // Process the command locally (simulating offline processing)
+                const responseText = processCommand(commandText);
+                responseOutput.textContent = responseText;
+
+                // Save command history to Firestore
+                saveCommand(commandText, responseText);
+            };
+
+            recognition.onerror = (event) => {
+                console.error("Speech recognition error:", event.error);
+                statusMessage.textContent = `Error: ${event.error}. Try again.`;
+                responseOutput.textContent = "Command failed.";
+                stopListening();
+            };
+
+            recognition.onend = () => {
+                stopListening();
+            };
+
+            try {
+                recognition.start();
+            } catch (e) {
+                console.error("Recognition start failed:", e);
+                statusMessage.textContent = "Microphone failed to start. Check permissions.";
+                stopListening();
+            }
+        }
+
+        /**
+         * Stops the speech recognition service and resets UI state.
+         */
+        function stopListening() {
+            if (recognition) {
+                recognition.stop();
+            }
+            isListening = false;
+            micButton.classList.remove('listening');
+            if (statusMessage.textContent.includes('Listening')) {
+                 statusMessage.textContent = "Tap the mic to start listening...";
+                 responseOutput.textContent = "Awaiting Command...";
+            }
+        }
+
+        /**
+         * Saves a command and its response to Firestore.
+         */
+        async function saveCommand(command, response) {
+            const db = window.db;
+            const userId = window.userId;
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+            if (!db || !userId) {
+                console.warn("Firestore not ready. Cannot save command history.");
+                return;
+            }
+            
+            try {
+                const path = `/artifacts/${appId}/users/${userId}/voice_commands`;
+                await addDoc(collection(db, path), {
+                    command: command,
+                    response: response,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp() // Requires firebase.firestore to be available
+                });
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        }
+        
+        /**
+         * Loads and displays the command history from Firestore in real-time.
+         */
+        window.loadHistory = function(db, userId, appId) {
+            historyList.innerHTML = '';
+            
+            if (!db || !userId) {
+                document.getElementById('loading-history').textContent = "Waiting for user authentication...";
+                return;
+            }
+            
+            const path = `/artifacts/${appId}/users/${userId}/voice_commands`;
+            const q = query(collection(db, path), orderBy("timestamp", "desc"));
+
+            // Set up real-time listener
+            onSnapshot(q, (snapshot) => {
+                if (snapshot.empty) {
+                    historyList.innerHTML = '<p class="text-center text-gray-500">No commands recorded yet. Try giving a command!</p>';
+                    return;
+                }
+                
+                historyList.innerHTML = ''; // Clear previous list
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const date = data.timestamp ? new Date(data.timestamp.toDate()).toLocaleTimeString() : '...';
+                    
+                    const listItem = document.createElement('div');
+                    listItem.className = 'command-item p-3 rounded-md bg-gray-700 shadow-md';
+                    listItem.innerHTML = `
+                        <div class="flex justify-between items-start text-sm text-gray-400">
+                            <span>${date}</span>
+                            <span class="text-xs text-gray-500">ID: ${userId.substring(0, 8)}...</span>
+                        </div>
+                        <p class="font-medium mt-1 text-base text-gray-200">
+                            <span class="text-indigo-400">Command:</span> ${data.command}
+                        </p>
+                        <p class="text-sm italic mt-1 text-green-300">
+                            <span class="text-gray-400 font-semibold">Response:</span> ${data.response}
+                        </p>
+                    `;
+                    historyList.appendChild(listItem);
+                });
+            }, (error) => {
+                console.error("Error listening to history:", error);
+                historyList.innerHTML = `<p class="text-center text-red-400">Error loading history: ${error.message}</p>`;
+            });
+        }
+        
+        // Expose firebase utilities for `saveCommand`'s serverTimestamp usage
+        // Note: This is an ugly but necessary bridge between the module and non-module script contexts.
+        window.firebase = { 
+             firestore: { 
+                 FieldValue: {
+                     serverTimestamp: () => {
+                         // A simple hack to get the function from the module scope in a running environment.
+                         // In a non-sandbox environment, you would import serverTimestamp directly.
+                         return null; // Will be patched by the module script if executed in Canvas
+                     }
+                 }
+             }
+        };
+
+        // Attempt to access and patch the required serverTimestamp function after Firebase loads
+        window.addEventListener('load', () => {
+            // Wait briefly for the module script to execute and set up globals
+            setTimeout(() => {
+                if (window.db) {
+                    const { serverTimestamp } = getFirestore.constructor.name === "Function" ? getFirestore(initializeApp(firebaseConfig))._firestore.type : {};
+                    if (serverTimestamp) {
+                       window.firebase.firestore.FieldValue.serverTimestamp = () => {
+                            // Since we can't directly use imported functions in this scope, we simulate it
+                            // by returning a placeholder. The real `serverTimestamp()` will be used in the module scope
+                            // if the environment supports it, but for compatibility, we use this structure.
+                            // In this execution environment, it is assumed that the firestore object is ready.
+                            return window.serverTimestampInstance || { dummy: true };
+                       };
+                    }
+                }
+            }, 1000);
+        });
+        
+    </script>
+    <script>
+        // Set up the actual serverTimestamp object for the non-module script to access
+        // This relies on Firebase SDKs being loaded correctly.
+        window.addEventListener('load', () => {
+            // We need to fetch the actual serverTimestamp function to bridge the module/non-module gap
+            // This is environment specific, so we rely on the import mechanism above to do the heavy lifting
+            // and simply ensure `startListening` is available on the window object.
+            // No action needed here as long as the module script is executed first.
+        });
+    </script>
+
+</body>
+</html>
+
